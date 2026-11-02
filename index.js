@@ -8,7 +8,6 @@ const {
   ButtonBuilder,
   ButtonStyle,
   MessageFlags,
-  PermissionsBitField,
   EmbedBuilder,
 } = require('discord.js');
 const { translate } = require('google-translate-api-x');
@@ -27,8 +26,6 @@ app.listen(PORT, () => {
 });
 
 // --- 2. CRYPTO SCAM SCANNER CONFIGURATION ---
-
-// Common triggers in crypto scam screenshots & fake promo cards
 const SCAM_TRIGGERS = [
   'airdrop',
   'binance giveaway',
@@ -62,19 +59,14 @@ const SCAM_TRIGGERS = [
   'withdraw btc',
 ];
 
-// Helper: Check if text contains high-confidence crypto scam phrases
 function detectCryptoScam(rawText) {
   if (!rawText) return null;
   const text = rawText.toLowerCase().replace(/\s+/g, ' ');
 
-  // Look for exact matches
   for (const trigger of SCAM_TRIGGERS) {
-    if (text.includes(trigger)) {
-      return trigger;
-    }
+    if (text.includes(trigger)) return trigger;
   }
 
-  // Look for suspicious combinations (e.g., "bonus" + "btc" or "giveaway" + "telegram")
   const hasGiveaway = text.includes('giveaway') || text.includes('claim') || text.includes('reward') || text.includes('bonus');
   const hasCrypto = text.includes('btc') || text.includes('eth') || text.includes('crypto') || text.includes('usdt') || text.includes('wallet');
   const hasAction = text.includes('qr') || text.includes('scan') || text.includes('site') || text.includes('code');
@@ -132,18 +124,38 @@ client.once(Events.ClientReady, () => {
   console.log(`✅ Logged in and ready as ${client.user.tag}!`);
 });
 
-// --- 4. MESSAGE SCANNING (OCR for scam images + translation buttons) ---
+// --- 4. MESSAGE SCANNING (Commands, OCR for scam images, & Translate Buttons) ---
 client.on(Events.MessageCreate, async (message) => {
   if (message.author.bot) return;
 
-  // 4A. SCAN ATTACHMENTS (Images) FOR SCAM TEXT VIA OCR
+  const content = message.content.trim().toLowerCase();
+
+  // --- COMMAND: PING ---
+  if (content === '!ping' || content === 'ping') {
+    const sent = await message.reply('🏓 Pinging...');
+    const latency = sent.createdTimestamp - message.createdTimestamp;
+    const apiPing = Math.round(client.ws.ping);
+    return sent.edit(`🏓 **Pong!**\n⏱️ Bot Latency: \`${latency}ms\` | 🌐 API Ping: \`${apiPing}ms\``);
+  }
+
+  // --- COMMAND: HELP ---
+  if (content === '!help' || content === 'help') {
+    return message.reply(
+      '🤖 **Rony Bot Commands & Features:**\n' +
+      '• `!ping` - Check bot status and latency\n' +
+      '• `!help` - View this list of features\n' +
+      '• **Auto Translation:** Click the `🌐 Translate` button to privately read any message in your role language!\n' +
+      '• **Anti-Scam Shield:** Automatically scans uploaded photos and deletes crypto scam images.'
+    );
+  }
+
+  // --- 4A. SCAN ATTACHMENTS (Images) FOR SCAM TEXT VIA OCR ---
   if (message.attachments.size > 0) {
     for (const [, attachment] of message.attachments) {
       const isImage = attachment.contentType?.startsWith('image/') ||
         /\.(png|jpe?g|webp)$/i.test(attachment.name || '');
 
       if (isImage) {
-        // Run OCR in background
         (async () => {
           try {
             const { data } = await Tesseract.recognize(attachment.url, 'eng');
@@ -153,17 +165,14 @@ client.on(Events.MessageCreate, async (message) => {
             if (matchedScam) {
               console.warn(`🚨 Crypto scam pic detected from ${message.author.tag}! Trigger: "${matchedScam}"`);
 
-              // 1. Delete scam message immediately
               if (message.deletable) {
                 await message.delete().catch(() => null);
               }
 
-              // 2. Timeout the user for 1 hour to prevent repeat spam (if bot has permission)
               if (message.member && message.member.moderatable) {
                 await message.member.timeout(60 * 60 * 1000, `Posted crypto scam image (Trigger: ${matchedScam})`).catch(() => null);
               }
 
-              // 3. Post notification in channel
               await message.channel.send({
                 embeds: [
                   new EmbedBuilder()
@@ -174,11 +183,10 @@ client.on(Events.MessageCreate, async (message) => {
                     .setTimestamp(),
                 ],
               }).then((msg) => {
-                // Auto-delete warning embed after 15 seconds to keep channel clean
                 setTimeout(() => msg.delete().catch(() => null), 15000);
               }).catch(console.error);
 
-              return; // Stop processing this message
+              return;
             }
           } catch (ocrErr) {
             console.error('OCR processing error:', ocrErr.message);
@@ -188,7 +196,7 @@ client.on(Events.MessageCreate, async (message) => {
     }
   }
 
-  // 4B. ATTACH TRANSLATE BUTTON TO REGULAR CHAT MESSAGES
+  // --- 4B. ATTACH TRANSLATE BUTTON TO CHAT MESSAGES ---
   if (message.content.trim()) {
     const row = new ActionRowBuilder().addComponents(
       new ButtonBuilder()
