@@ -1,5 +1,4 @@
 require('dotenv').config();
-const http = require('http');
 const express = require('express');
 const {
   Client,
@@ -10,9 +9,8 @@ const {
   ButtonStyle,
   MessageFlags,
 } = require('discord.js');
-const { translate } = require('@vitalets/google-translate-api');
 
-// --- 1. LIGHTWEIGHT WEB SERVER (Required for 24/7 free cloud hosts like Render/Koyeb) ---
+// --- 1. LIGHTWEIGHT WEB SERVER (Keeps cloud container alive) ---
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -24,7 +22,64 @@ app.listen(PORT, () => {
   console.log(`🌐 Web server active on port ${PORT}`);
 });
 
-// --- 2. DISCORD CLIENT CONFIGURATION ---
+// --- 2. MULTI-PROVIDER CLOUD TRANSLATOR (Never blocked by cloud datacenter IPs) ---
+async function translateText(text, targetLang) {
+  // Try Provider 1: MyMemory (Free public API, works 100% on cloud IPs)
+  try {
+    const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=autodetect|${targetLang}`;
+    const response = await fetch(url);
+    const data = await response.json();
+
+    if (data && data.responseData && data.responseData.translatedText) {
+      let translated = data.responseData.translatedText;
+      // If MyMemory returns MYMEMORY WARNING, still use it or fallback
+      if (!translated.includes('MYMEMORY WARNING')) {
+        const detected = data.responseData.match || targetLang;
+        return {
+          text: translated,
+          from: data.matches && data.matches[0] ? data.matches[0]['segment'] : null,
+        };
+      }
+    }
+  } catch (err) {
+    console.warn('Provider 1 (MyMemory) failed, trying fallback...', err.message);
+  }
+
+  // Try Provider 2: LibreTranslate Free Mirror
+  try {
+    const res = await fetch('https://translate.terraprint.co/translate', {
+      method: 'POST',
+      body: JSON.stringify({
+        q: text,
+        source: 'auto',
+        target: targetLang,
+        format: 'text',
+      }),
+      headers: { 'Content-Type': 'application/json' },
+    });
+    const result = await res.json();
+    if (result && result.translatedText) {
+      return { text: result.translatedText };
+    }
+  } catch (err) {
+    console.warn('Provider 2 failed:', err.message);
+  }
+
+  // Try Provider 3: Lingva (Open source Google proxy)
+  try {
+    const res = await fetch(`https://lingva.ml/api/v1/auto/${targetLang}/${encodeURIComponent(text)}`);
+    const result = await res.json();
+    if (result && result.translation) {
+      return { text: result.translation };
+    }
+  } catch (err) {
+    console.warn('Provider 3 failed:', err.message);
+  }
+
+  throw new Error('All translation providers exhausted.');
+}
+
+// --- 3. DISCORD CLIENT CONFIGURATION ---
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -34,7 +89,6 @@ const client = new Client({
   ],
 });
 
-// Supported roles -> ISO 639-1 language codes
 const ROLE_TO_LANG = {
   spanish: 'es',
   español: 'es',
@@ -47,7 +101,7 @@ const ROLE_TO_LANG = {
   portuguese: 'pt',
   russian: 'ru',
   japanese: 'ja',
-  chinese: 'zh-CN',
+  chinese: 'zh',
   hindi: 'hi',
   arabic: 'ar',
 };
@@ -61,7 +115,7 @@ const LANG_NAMES = {
   pt: 'Portuguese',
   ru: 'Russian',
   ja: 'Japanese',
-  'zh-CN': 'Chinese',
+  zh: 'Chinese',
   hi: 'Hindi',
   ar: 'Arabic',
 };
@@ -70,7 +124,7 @@ client.once(Events.ClientReady, () => {
   console.log(`✅ Logged in and ready as ${client.user.tag}!`);
 });
 
-// --- 3. ATTACH TRANSLATE BUTTON TO CHAT MESSAGES ---
+// Attach translate button
 client.on(Events.MessageCreate, async (message) => {
   if (message.author.bot || !message.content.trim()) return;
 
@@ -91,7 +145,7 @@ client.on(Events.MessageCreate, async (message) => {
   }
 });
 
-// --- 4. HANDLE TRANSLATE BUTTON CLICKS ---
+// Handle translate interaction
 client.on(Events.InteractionCreate, async (interaction) => {
   if (!interaction.isButton()) return;
   if (!interaction.customId.startsWith('tr_')) return;
@@ -135,10 +189,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const textToTranslate = originalMessage.content;
     const authorName = originalMessage.author.displayName || originalMessage.author.username;
 
-    const res = await translate(textToTranslate, { to: targetLang });
+    const res = await translateText(textToTranslate, targetLang);
 
-    const detectedIso = res.from?.language?.iso?.toLowerCase();
-    if (detectedIso && detectedIso === targetLang.toLowerCase()) {
+    // If identical translation
+    if (res.text.trim().toLowerCase() === textToTranslate.trim().toLowerCase()) {
       const langName = LANG_NAMES[targetLang] || roleDisplayName;
       return interaction.editReply({
         content: `ℹ️ This message is already in **${langName}**!`,
