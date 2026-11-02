@@ -10,7 +10,7 @@ const {
   MessageFlags,
 } = require('discord.js');
 
-// --- 1. LIGHTWEIGHT WEB SERVER (Keeps cloud container alive) ---
+// --- 1. LIGHTWEIGHT WEB SERVER (Keeps Render container alive) ---
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -22,61 +22,49 @@ app.listen(PORT, () => {
   console.log(`🌐 Web server active on port ${PORT}`);
 });
 
-// --- 2. MULTI-PROVIDER CLOUD TRANSLATOR (Never blocked by cloud datacenter IPs) ---
+// --- 2. BULLETPROOF TRANSLATOR (Google GTX Endpoint) ---
 async function translateText(text, targetLang) {
-  // Try Provider 1: MyMemory (Free public API, works 100% on cloud IPs)
+  // Method 1: Google GTX API (Standard Google Translate Client endpoint)
   try {
-    const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=autodetect|${targetLang}`;
-    const response = await fetch(url);
-    const data = await response.json();
+    const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${encodeURIComponent(targetLang)}&dt=t&q=${encodeURIComponent(text)}`;
+    const response = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      },
+    });
 
-    if (data && data.responseData && data.responseData.translatedText) {
-      let translated = data.responseData.translatedText;
-      // If MyMemory returns MYMEMORY WARNING, still use it or fallback
-      if (!translated.includes('MYMEMORY WARNING')) {
-        const detected = data.responseData.match || targetLang;
+    if (response.ok) {
+      const data = await response.json();
+      if (data && data[0]) {
+        // Collect all translated segments (for multi-sentence messages)
+        const translatedSegments = data[0].map((item) => item[0]).join('');
+        const detectedSrc = data[2] || 'auto';
         return {
-          text: translated,
-          from: data.matches && data.matches[0] ? data.matches[0]['segment'] : null,
+          text: translatedSegments,
+          detectedSrc,
         };
       }
     }
   } catch (err) {
-    console.warn('Provider 1 (MyMemory) failed, trying fallback...', err.message);
+    console.warn('Google GTX failed, trying MyMemory fallback...', err.message);
   }
 
-  // Try Provider 2: LibreTranslate Free Mirror
+  // Method 2: MyMemory API Fallback
   try {
-    const res = await fetch('https://translate.terraprint.co/translate', {
-      method: 'POST',
-      body: JSON.stringify({
-        q: text,
-        source: 'auto',
-        target: targetLang,
-        format: 'text',
-      }),
-      headers: { 'Content-Type': 'application/json' },
-    });
-    const result = await res.json();
-    if (result && result.translatedText) {
-      return { text: result.translatedText };
+    const mmUrl = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=autodetect|${targetLang}`;
+    const mmRes = await fetch(mmUrl);
+    const mmData = await mmRes.json();
+    if (mmData && mmData.responseData && mmData.responseData.translatedText) {
+      return {
+        text: mmData.responseData.translatedText,
+        detectedSrc: 'auto',
+      };
     }
   } catch (err) {
-    console.warn('Provider 2 failed:', err.message);
+    console.warn('MyMemory fallback failed:', err.message);
   }
 
-  // Try Provider 3: Lingva (Open source Google proxy)
-  try {
-    const res = await fetch(`https://lingva.ml/api/v1/auto/${targetLang}/${encodeURIComponent(text)}`);
-    const result = await res.json();
-    if (result && result.translation) {
-      return { text: result.translation };
-    }
-  } catch (err) {
-    console.warn('Provider 3 failed:', err.message);
-  }
-
-  throw new Error('All translation providers exhausted.');
+  throw new Error('All translation services failed.');
 }
 
 // --- 3. DISCORD CLIENT CONFIGURATION ---
@@ -101,7 +89,7 @@ const ROLE_TO_LANG = {
   portuguese: 'pt',
   russian: 'ru',
   japanese: 'ja',
-  chinese: 'zh',
+  chinese: 'zh-CN',
   hindi: 'hi',
   arabic: 'ar',
 };
@@ -115,7 +103,7 @@ const LANG_NAMES = {
   pt: 'Portuguese',
   ru: 'Russian',
   ja: 'Japanese',
-  zh: 'Chinese',
+  'zh-CN': 'Chinese',
   hi: 'Hindi',
   ar: 'Arabic',
 };
@@ -145,7 +133,7 @@ client.on(Events.MessageCreate, async (message) => {
   }
 });
 
-// Handle translate interaction
+// Handle translate button clicks
 client.on(Events.InteractionCreate, async (interaction) => {
   if (!interaction.isButton()) return;
   if (!interaction.customId.startsWith('tr_')) return;
@@ -191,8 +179,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     const res = await translateText(textToTranslate, targetLang);
 
-    // If identical translation
-    if (res.text.trim().toLowerCase() === textToTranslate.trim().toLowerCase()) {
+    // If already in the target language
+    if (res.detectedSrc === targetLang || res.text.trim().toLowerCase() === textToTranslate.trim().toLowerCase()) {
       const langName = LANG_NAMES[targetLang] || roleDisplayName;
       return interaction.editReply({
         content: `ℹ️ This message is already in **${langName}**!`,
