@@ -196,8 +196,15 @@ client.on(Events.MessageCreate, async (message) => {
     }
   }
 
-  // --- 4B. ATTACH TRANSLATE BUTTON TO CHAT MESSAGES ---
+  // --- 4B. AUTO-REACT THUMBS UP & ATTACH TRANSLATE BUTTON TO CHAT MESSAGES ---
   if (message.content.trim()) {
+    // Automatically add thumbs up reaction
+    try {
+      await message.react('👍');
+    } catch (reactErr) {
+      console.error('Error adding thumbs up reaction:', reactErr);
+    }
+
     const row = new ActionRowBuilder().addComponents(
       new ButtonBuilder()
         .setCustomId(`tr_${message.id}`)
