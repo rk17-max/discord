@@ -271,4 +271,68 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
 });
 
+// --- 6. LOG DELETED MESSAGES TO #deleted-messages ---
+client.on(Events.MessageDelete, async (message) => {
+  // Ignore deletions of bot messages or empty messages without text/attachments
+  if (message.author?.bot) return;
+
+  try {
+    const guild = message.guild;
+    if (!guild) return;
+
+    // Find the #deleted-messages channel
+    const logChannel = guild.channels.cache.find(
+      (ch) => ch.name === 'deleted-messages' && ch.isTextBased()
+    );
+
+    if (!logChannel) return;
+
+    const author = message.author;
+    const authorTag = author ? `${author.tag} (<@${author.id}>)` : 'Unknown Author';
+    const authorAvatar = author ? author.displayAvatarURL({ dynamic: true }) : null;
+    const channelName = message.channel ? `<#${message.channel.id}>` : 'Unknown Channel';
+
+    const embed = new EmbedBuilder()
+      .setColor(0xff3366)
+      .setTitle('🗑️ Message Deleted')
+      .addFields(
+        { name: 'Author', value: authorTag, inline: true },
+        { name: 'Channel', value: channelName, inline: true },
+        {
+          name: 'Content',
+          value: message.content ? (message.content.length > 1024 ? message.content.slice(0, 1021) + '...' : message.content) : '*No text content*',
+        }
+      )
+      .setTimestamp()
+      .setFooter({ text: `Message ID: ${message.id}` });
+
+    if (authorAvatar) {
+      embed.setThumbnail(authorAvatar);
+    }
+
+    // If attachments (images/files) were deleted with the message, log their names/URLs
+    if (message.attachments && message.attachments.size > 0) {
+      const attachmentList = message.attachments
+        .map((att) => `• [${att.name}](${att.proxyURL || att.url})`)
+        .join('\n');
+      embed.addFields({
+        name: `Attachments (${message.attachments.size})`,
+        value: attachmentList.length > 1024 ? attachmentList.slice(0, 1021) + '...' : attachmentList,
+      });
+
+      // If the first attachment is an image, display it in the embed
+      const firstImage = message.attachments.find(
+        (att) => att.contentType?.startsWith('image/') || /\.(png|jpe?g|webp|gif)$/i.test(att.name || '')
+      );
+      if (firstImage) {
+        embed.setImage(firstImage.proxyURL || firstImage.url);
+      }
+    }
+
+    await logChannel.send({ embeds: [embed] });
+  } catch (err) {
+    console.error('Error logging deleted message:', err);
+  }
+});
+
 client.login(process.env.DISCORD_TOKEN);
