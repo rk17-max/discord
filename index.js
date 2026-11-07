@@ -3,6 +3,7 @@ const express = require('express');
 const {
   Client,
   GatewayIntentBits,
+  Partials,
   Events,
   ActionRowBuilder,
   ButtonBuilder,
@@ -86,7 +87,16 @@ const client = new Client({
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.GuildMembers,
   ],
+  partials: [
+    Partials.Message,
+    Partials.Channel,
+    Partials.Reaction,
+    Partials.User,
+  ],
 });
+
+// Cache last 2000 messages in memory so uncached/old deletions are never lost
+const activeMessageCache = new Map();
 
 const ROLE_TO_LANG = {
   spanish: 'es',
@@ -127,6 +137,24 @@ client.once(Events.ClientReady, () => {
 // --- 4. MESSAGE SCANNING (Commands, OCR for scam images, & Translate Buttons) ---
 client.on(Events.MessageCreate, async (message) => {
   if (message.author.bot) return;
+
+  // Always cache message details for 100% reliable delete logging
+  activeMessageCache.set(message.id, {
+    content: message.content,
+    author: message.author,
+    channelId: message.channel.id,
+    attachments: message.attachments.map((att) => ({
+      name: att.name,
+      url: att.url,
+      proxyURL: att.proxyURL,
+      contentType: att.contentType,
+    })),
+  });
+
+  if (activeMessageCache.size > 2000) {
+    const oldestKey = activeMessageCache.keys().next().value;
+    activeMessageCache.delete(oldestKey);
+  }
 
   const content = message.content.trim().toLowerCase();
 
@@ -273,34 +301,48 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
 // --- 6. LOG DELETED MESSAGES TO #deleted-messages ---
 client.on(Events.MessageDelete, async (message) => {
-  // Ignore deletions of bot messages or empty messages without text/attachments
-  if (message.author?.bot) return;
-
   try {
+    // If message is partial, try fetching from in-memory cache or Discord
+    let content = message.content;
+    let author = message.author;
+    let attachments = message.attachments;
+
+    const cached = activeMessageCache.get(message.id);
+    if (cached) {
+      if (!content) content = cached.content;
+      if (!author) author = cached.author;
+      if (!attachments || attachments.size === 0) attachments = cached.attachments;
+    }
+
+    // Ignore if author is a bot
+    if (author?.bot) return;
+
     const guild = message.guild;
     if (!guild) return;
 
-    // Find the #deleted-messages channel
+    // Search for #deleted-messages (case-insensitive)
     const logChannel = guild.channels.cache.find(
-      (ch) => ch.name === 'deleted-messages' && ch.isTextBased()
+      (ch) => ch.name.toLowerCase() === 'deleted-messages' && ch.isTextBased()
     );
 
-    if (!logChannel) return;
+    if (!logChannel) {
+      console.warn('⚠️ #deleted-messages channel not found in cache. Checking permissions...');
+      return;
+    }
 
-    const author = message.author;
-    const authorTag = author ? `${author.tag} (<@${author.id}>)` : 'Unknown Author';
-    const authorAvatar = author ? author.displayAvatarURL({ dynamic: true }) : null;
-    const channelName = message.channel ? `<#${message.channel.id}>` : 'Unknown Channel';
+    const authorTag = author ? `${author.tag || author.username} (<@${author.id}>)` : 'Unknown Author';
+    const authorAvatar = author ? (typeof author.displayAvatarURL === 'function' ? author.displayAvatarURL({ dynamic: true }) : null) : null;
+    const channelMention = message.channel ? `<#${message.channel.id}>` : 'Unknown Channel';
 
     const embed = new EmbedBuilder()
       .setColor(0xff3366)
       .setTitle('🗑️ Message Deleted')
       .addFields(
         { name: 'Author', value: authorTag, inline: true },
-        { name: 'Channel', value: channelName, inline: true },
+        { name: 'Channel', value: channelMention, inline: true },
         {
           name: 'Content',
-          value: message.content ? (message.content.length > 1024 ? message.content.slice(0, 1021) + '...' : message.content) : '*No text content*',
+          value: content && content.trim() ? (content.length > 1024 ? content.slice(0, 1021) + '...' : content) : '*[No text content or uncached]*',
         }
       )
       .setTimestamp()
@@ -310,18 +352,19 @@ client.on(Events.MessageDelete, async (message) => {
       embed.setThumbnail(authorAvatar);
     }
 
-    // If attachments (images/files) were deleted with the message, log their names/URLs
-    if (message.attachments && message.attachments.size > 0) {
-      const attachmentList = message.attachments
+    // Handle attachments
+    if (attachments && (attachments.size > 0 || (Array.isArray(attachments) && attachments.length > 0))) {
+      const attArray = attachments.size ? Array.from(attachments.values()) : attachments;
+      const attachmentList = attArray
         .map((att) => `• [${att.name}](${att.proxyURL || att.url})`)
         .join('\n');
+
       embed.addFields({
-        name: `Attachments (${message.attachments.size})`,
+        name: `Attachments (${attArray.length})`,
         value: attachmentList.length > 1024 ? attachmentList.slice(0, 1021) + '...' : attachmentList,
       });
 
-      // If the first attachment is an image, display it in the embed
-      const firstImage = message.attachments.find(
+      const firstImage = attArray.find(
         (att) => att.contentType?.startsWith('image/') || /\.(png|jpe?g|webp|gif)$/i.test(att.name || '')
       );
       if (firstImage) {
