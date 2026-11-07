@@ -10,6 +10,7 @@ const {
   ButtonStyle,
   MessageFlags,
   EmbedBuilder,
+  PermissionsBitField,
 } = require('discord.js');
 const { translate } = require('google-translate-api-x');
 const Tesseract = require('tesseract.js');
@@ -26,7 +27,48 @@ app.listen(PORT, () => {
   console.log(`🌐 Web server active on port ${PORT}`);
 });
 
-// --- 2. CRYPTO SCAM SCANNER CONFIGURATION ---
+// --- 2. SECURITY CONFIGURATION (Scam, Phishing, & Discord Invites) ---
+
+// Discord invite regex (covers discord.gg, discord.com/invite, discordapp.com/invite, etc.)
+const DISCORD_INVITE_REGEX = /(?:https?:\/\/)?(?:www\.)?(?:discord(?:\.gg|(?:app)?\.com\/invite))\/(?<invite>[a-zA-Z0-9\-_]+)/gi;
+
+// Phishing / fake Nitro / fake Steam / malicious domains pattern
+const PHISHING_PATTERNS = [
+  /discor[cl]\.gift/i,
+  /discord-(?:nitro|gift|drop|app|claim|steam|giveaway)/i,
+  /dlscord/i,
+  /disord/i,
+  /dls-cord/i,
+  /discocl/i,
+  /steam(?:community)?-(?:trade|nitro|gift|promo)/i,
+  /steamcommnunity/i,
+  /steampromote/i,
+  /nitro-(?:gift|free|claim)/i,
+  /free-nitro/i,
+  /claim-nitro/i,
+  /gift-nitro/i,
+];
+
+// Helper: Check if message contains unauthorized invites or phishing links
+function detectMaliciousLinks(content) {
+  if (!content) return null;
+
+  // 1. Check for phishing domains
+  for (const pattern of PHISHING_PATTERNS) {
+    if (pattern.test(content)) {
+      return { type: 'Phishing / Fake Nitro Link', match: content.match(pattern)[0] };
+    }
+  }
+
+  // 2. Check for Discord invite links
+  const inviteMatch = content.match(DISCORD_INVITE_REGEX);
+  if (inviteMatch) {
+    return { type: 'Unauthorized Discord Invite', match: inviteMatch[0] };
+  }
+
+  return null;
+}
+
 const SCAM_TRIGGERS = [
   'airdrop',
   'binance giveaway',
@@ -154,6 +196,55 @@ client.on(Events.MessageCreate, async (message) => {
   if (activeMessageCache.size > 2000) {
     const oldestKey = activeMessageCache.keys().next().value;
     activeMessageCache.delete(oldestKey);
+  }
+
+  // --- 4. ANTI-INVITE & PHISHING LINK DETECTOR ---
+  // Allow admins and moderators with 'ManageMessages' permission to post links
+  const isStaff = message.member?.permissions.has(PermissionsBitField.Flags.ManageMessages) ||
+    message.member?.permissions.has(PermissionsBitField.Flags.Administrator);
+
+  if (!isStaff && message.content) {
+    const malicious = detectMaliciousLinks(message.content);
+    if (malicious) {
+      console.warn(`🚨 Malicious link detected from ${message.author.tag}! Type: ${malicious.type}`);
+
+      // 1. Delete the message immediately
+      if (message.deletable) {
+        await message.delete().catch(() => null);
+      }
+
+      // 2. If it's a phishing/nitro scam link, timeout user for 2 hours
+      if (malicious.type.includes('Phishing') && message.member?.moderatable) {
+        await message.member.timeout(2 * 60 * 60 * 1000, `Posted phishing link (${malicious.match})`).catch(() => null);
+      }
+
+      // 3. Send a brief warning that auto-deletes in 8 seconds
+      await message.channel.send({
+        content: `⚠️ <@${message.author.id}>, **${malicious.type}s** are not allowed on this server!`,
+      }).then((msg) => {
+        setTimeout(() => msg.delete().catch(() => null), 8000);
+      }).catch(console.error);
+
+      // 4. Log the incident directly to #deleted-messages
+      const logChannel = message.guild?.channels.cache.find(
+        (ch) => ch.name.toLowerCase() === 'deleted-messages' && ch.isTextBased()
+      );
+
+      if (logChannel) {
+        const embed = new EmbedBuilder()
+          .setColor(0xff0000)
+          .setTitle(`🛡️ Blocked ${malicious.type}`)
+          .addFields(
+            { name: 'User', value: `${message.author.tag} (<@${message.author.id}>)`, inline: true },
+            { name: 'Channel', value: `<#${message.channel.id}>`, inline: true },
+            { name: 'Blocked Content', value: `\`\`\`${message.content.slice(0, 500)}\`\`\`` }
+          )
+          .setTimestamp();
+        logChannel.send({ embeds: [embed] }).catch(console.error);
+      }
+
+      return; // Stop processing this message
+    }
   }
 
   const content = message.content.trim().toLowerCase();
